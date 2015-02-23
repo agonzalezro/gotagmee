@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/agonzalezro/gotagmee/db"
 	"github.com/agonzalezro/gotagmee/meetup"
 )
 
@@ -20,14 +21,21 @@ func main() {
 	var neo4jDB = flag.String("neo4j", "", "If set it will store the scraped data there. Use the form: protocol://host:port/db/data")
 	flag.Parse()
 
-	api, err := meetup.NewAPI(flag.Arg(0), flag.Arg(1), *neo4jDB)
+	if *neo4jDB == "" {
+		fmt.Fprintf(os.Stderr, "I know that `-neo4j` is an option, but it is not. The code without Neo4J is not implemented, sorry! :(")
+	}
+
+	api := meetup.NewAPI(flag.Arg(0), flag.Arg(1))
+
+	membersChan := make(chan db.Member, 1)
+	go api.Members(membersChan)
+
+	db, err := db.NewDB(*neo4jDB)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	membersChan := make(chan meetup.Member, 1)
-	go api.Members(membersChan)
 	for m := range membersChan {
-		log.Println(m)
+		db.Store(m)
 	}
 }

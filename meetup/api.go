@@ -10,7 +10,9 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/agonzalezro/gotagmee/db"
 	"github.com/jmcvetta/neoism"
 )
 
@@ -25,35 +27,14 @@ type API struct {
 	debug bool
 }
 
-func NewAPI(token, groupURLName, db string) (*API, error) {
-	api := API{
+func NewAPI(token, groupURLName string) *API {
+	return &API{
 		token:          token,
 		groupURLName:   groupURLName,
-		paginationSize: 20,
+		paginationSize: 100,
 		client:         http.Client{},
 		debug:          os.Getenv("DEBUG") != "",
 	}
-	if db != "" {
-		dbConn, err := neoism.Connect(db)
-		if err != nil {
-			return nil, err
-		}
-		api.db = dbConn
-	}
-	return &api, nil
-}
-
-func (a API) store(m Member) error {
-	switch a.db {
-	case nil:
-		// Should print in console, but I didn't implement this, sorry!
-	default:
-		err := a.storeInDB(m)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (a API) endpoint(method string) string {
@@ -69,6 +50,7 @@ func (a API) doRequest(endpoint string, v *url.Values) (*http.Response, error) {
 		"sign":          "true",
 		"key":           a.token,
 		"group_urlname": a.groupURLName,
+		"page":          strconv.Itoa(a.paginationSize),
 	} {
 		v.Set(key, value)
 	}
@@ -87,29 +69,49 @@ func (a API) doRequest(endpoint string, v *url.Values) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == 429 { // Too many requests
+		tresshold := 5 * time.Second
+
+		reset := resp.Header.Get("X-RateLimit-Reset")
+		if reset == "" {
+			// It's possible that the previous tresshold was not enough, we are almost there, but not yet!
+			time.Sleep(tresshold)
+			return a.doRequest(endpoint, v)
+		}
+
+		sleep, err := time.ParseDuration(reset + "s")
+		if err != nil {
+			return resp, err
+		}
+		log.Printf("Throttled! Sleeping %v...\n", sleep+tresshold)
+		time.Sleep(sleep + tresshold)
+		return a.doRequest(endpoint, v)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp, fmt.Errorf("Expected 200, got: %d (%s)", resp.StatusCode, endpoint)
 	}
 	return resp, nil
 }
 
-func (a API) Members(membersChan chan Member) error {
-	// members, err := a.getMembersCount()
-	// if err != nil {
-	// 	return err
-	// }
-	// pages := members / a.paginationSize
-	pages := 2 // TODO: to not saturate meetup.com
+func (a API) Members(membersChan chan db.Member) error {
+	members, err := a.getMembersCount()
+	if err != nil {
+		return err
+	}
+	pages := members / a.paginationSize
+	if members%a.paginationSize > 0 {
+		pages += 1
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(pages)
 
-	for i := 1; i <= pages; i++ {
+	for i := 0; i < pages; i++ {
 		go func(page int) {
 			defer wg.Done()
 
 			v := url.Values{}
-			v.Set("page", strconv.Itoa(page))
+			v.Set("offset", strconv.Itoa(page))
 
 			resp, err := a.doRequest(a.endpoint("/2/members"), &v)
 			defer resp.Body.Close()
@@ -126,8 +128,15 @@ func (a API) Members(membersChan chan Member) error {
 			mr := MembersResponse{}
 			err = json.NewDecoder(resp.Body).Decode(&mr)
 			for _, m := range mr.Results {
-				log.Println(m)
-				membersChan <- m
+				if a.debug {
+					log.Println("DEBUG:Member:", m)
+					log.Println("DEBUG:Results:", mr.Results)
+				}
+				var topics []string
+				for _, t := range m.Topics {
+					topics = append(topics, t.Name)
+				}
+				membersChan <- db.Member{m.Name, topics}
 			}
 		}(i)
 	}
