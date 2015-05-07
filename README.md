@@ -4,6 +4,16 @@ gotagmee
 This is a small project make for filling some data to a Neo4J server from the
 meetup.com API.
 
+Quick example
+-------------
+
+If you want to quickly run this:
+
+    go run main.go \
+        -neo4j="http://user:pass@host:port/db/data/" \
+        meetup_api_key \
+        group_id # (ex: go-london-user-group)
+
 Disclaimer
 ----------
 
